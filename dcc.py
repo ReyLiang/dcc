@@ -97,6 +97,16 @@ def auto_vm(filename):
         return dvm.DalvikOdexVMFormat(read(filename))
     raise Exception("unsupported file %s" % filename)
 
+def auto_vm_dexname(filename,dex_name):
+    ret = androconf.is_android(filename)
+    if ret == 'APK':
+        return dvm.DalvikVMFormat(apk.APK(filename).get_dex_name(dex_name))
+    elif ret == 'DEX':
+        return dvm.DalvikVMFormat(read(filename))
+    elif ret == 'DEY':
+        return dvm.DalvikOdexVMFormat(read(filename))
+    raise Exception("unsupported file %s" % filename)
+
 
 class MethodFilter(object):
     def __init__(self, configure, vm):
@@ -377,6 +387,43 @@ def compile_dex(apkfile, filtercfg):
 
     return compiled_method_code, errors
 
+def compile_dex_name(apkfile, filtercfg, dex_name):
+    show_logging(level=logging.INFO)
+
+    d = auto_vm_dexname(apkfile,dex_name)
+    dx = analysis.Analysis(d)
+
+    method_filter = MethodFilter(filtercfg, d)
+
+    compiler = Dex2C(d, dx)
+
+    compiled_method_code = {}
+    errors = []
+
+    for m in d.get_methods():
+        method_triple = get_method_triple(m)
+
+        jni_longname = JniLongName(*method_triple)
+        full_name = ''.join(method_triple)
+
+        if len(jni_longname) > 220:
+            logger.debug("name to long %s(> 220) %s" % (jni_longname, full_name))
+            continue
+
+        if method_filter.should_compile(m):
+            logger.debug("compiling %s" % (full_name))
+            try:
+                code = compiler.get_source_method(m)
+            except Exception as e:
+                logger.warning("compile method failed:%s (%s)" % (full_name, str(e)), exc_info=True)
+                errors.append('%s:%s' % (full_name, str(e)))
+                continue
+
+            if code:
+                compiled_method_code[method_triple] = code
+
+    return compiled_method_code, errors
+
 def is_apk(name):
     return name.endswith('.apk')
 
@@ -419,6 +466,58 @@ def dcc_main(apkfile, filtercfg, outapk, do_compile=True, project_dir=None, sour
         sign(unsigned_apk, outapk)
 
 
+
+def dcc_main_all(apkfile, filtercfg, outapk, do_compile=True, project_dir=None, source_archive='project-source.zip'):
+    if not os.path.exists(apkfile):
+        logger.error("file %s is not exists", apkfile)
+        return
+
+    dexNames = apk.APK(apkfile).get_dex_names()
+
+    # 查看有几个dex
+    # for dex_name in apk.APK(apkfile).get_dex_names():
+    #     logger.error('==== '+(dex_name))
+
+    compiled_methods_all = {}
+
+    for dex_name in dexNames:
+        compiled_methods, errors = compile_dex_name(apkfile, filtercfg,dex_name)
+
+        if errors:
+            logger.warning('================================')
+            logger.warning('\n'.join(errors))
+            logger.warning('================================')
+
+        if len(compiled_methods) == 0:
+            logger.info("no compiled methods")
+            continue
+
+        compiled_methods_all = {**compiled_methods_all,**compiled_methods}
+
+        if project_dir:
+            if not os.path.exists(project_dir):
+                shutil.copytree('project', project_dir)
+            write_compiled_methods(project_dir, compiled_methods)
+        else:
+            project_dir = make_temp_dir('dcc-project-')
+            shutil.rmtree(project_dir)
+            shutil.copytree('project', project_dir)
+            write_compiled_methods(project_dir, compiled_methods)
+            src_zip = archive_compiled_code(project_dir)
+            shutil.move(src_zip, source_archive)
+
+
+    if do_compile:
+        build_project(project_dir)
+
+    if is_apk(apkfile) and outapk:
+        decompiled_dir = ApkTool.decompile(apkfile)
+        native_compiled_dexes(decompiled_dir, compiled_methods_all)
+        copy_compiled_libs(project_dir, decompiled_dir)
+        unsigned_apk = ApkTool.compile(decompiled_dir)
+        sign(unsigned_apk, outapk)
+
+
 sys.setrecursionlimit(5000)
 
 if __name__ == '__main__':
@@ -431,6 +530,7 @@ if __name__ == '__main__':
     parser.add_argument('--no-build', action='store_true', default=False, help='Do not build the compiled code')
     parser.add_argument('--source-dir', help='The compiled cpp code output directory.')
     parser.add_argument('--project-archive', default='project-source.zip', help='Archive the project directory')
+    parser.add_argument('--all-dex', action='store_true', default=False, help='compile all dexs')
 
     args = vars(parser.parse_args())
     infile = args['infile']
@@ -439,11 +539,17 @@ if __name__ == '__main__':
     filtercfg = args['filter']
     do_compile = not args['no_build']
     source_archive = args['project_archive']
+    allDex = args['all_dex']
 
     if args['source_dir']:
         project_dir = args['source_dir']
     else:
         project_dir = None
+
+    #删除路径,因为后边需要拷贝路径
+    if project_dir:
+        if os.path.exists(project_dir):
+            shutil.rmtree(project_dir)
 
     dcc_cfg = {}
     with open('dcc.cfg') as fp:
@@ -460,7 +566,11 @@ if __name__ == '__main__':
         APKTOOL = dcc_cfg['apktool']
 
     try:
-        dcc_main(infile, filtercfg, outapk, do_compile, project_dir, source_archive)
+        if allDex:
+            dcc_main_all(infile, filtercfg, outapk, do_compile, project_dir, source_archive)
+        else:
+            dcc_main(infile, filtercfg, outapk, do_compile, project_dir, source_archive)
+
     except Exception as e:
         logger.error("Compile %s failed!" % infile, exc_info=True)
     finally:

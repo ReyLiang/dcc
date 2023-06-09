@@ -787,6 +787,21 @@ class APK(object):
             # TODO is this a good idea to return an empty string?
             return b""
 
+    def get_dex_name(self,dex_name):
+        """
+        Return the raw data of the classes dex file
+
+        This will give you the data of the file called `classes.dex`
+        inside the APK. If the APK has multiple DEX files, you need to use :func:`~APK.get_all_dex`.
+
+        :rtype: bytes
+        """
+        try:
+            return self.get_file(dex_name)
+        except FileNotPresent:
+            # TODO is this a good idea to return an empty string?
+            return b""
+
     def get_dex_names(self):
         """
         Return the names of all DEX files found in the APK.
